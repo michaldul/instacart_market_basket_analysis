@@ -16,7 +16,7 @@ def get_predictions(X):
                            right_on=['user_id', 'prev_order'],
                            suffixes=('', '_test'),
                            how='inner')
-    last_orders[['order_id', 'order_id_test']]
+
     prior_reordered = orders_product_prior[orders_product_prior['reordered'] == 1]
 
     predictions = pd.merge(last_orders, prior_reordered, on=['order_id'], how='left') \
@@ -41,8 +41,8 @@ if __name__ == '__main__':
             .apply(lambda x: [int(p) for p in x] if x.any() else [])
         train_pred = get_predictions(train_orders)
         print('F1-score', calc_avg_f1(train_y, train_pred))
-
-    test_orders = orders[orders['eval_set'] == 'test']
-    predictions = get_predictions(test_orders)
-    format_predictions(predictions) \
-        .to_csv('repeat_last_reordered.csv', header=['products'], index_label=['order_id'])
+    else:
+        test_orders = orders[orders['eval_set'] == 'test']
+        predictions = get_predictions(test_orders)
+        format_predictions(predictions) \
+            .to_csv('repeat_last_reordered.csv', header=['products'], index_label=['order_id'])
