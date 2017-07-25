@@ -187,10 +187,15 @@ priors_orders_detail.loc[:, '_user_buy_product_times'] = \
 
 prd = ka_add_groupby_features_1_vs_n(priors_orders_detail, ['product_id'],
                                      {'user_id': {'_prod_tot_cnts': 'count'},
-                                      'reordered': {'_prod_reorder_tot_cnts': 'sum'},
-                                      '_user_buy_product_times': {'_prod_buy_first_time_total_cnt': lambda x: sum(x == 1),
-                                                                  '_prod_buy_second_time_total_cnt': lambda x: sum(x == 2)}}
-                                     )
+                                       'reordered': {'_prod_reorder_tot_cnts': 'sum'}})
+
+prd = prd.set_index('product_id')
+prd['_prod_buy_first_time_total_cnt'] = priors_orders_detail[priors_orders_detail['_user_buy_product_times'] == 1]\
+    .groupby('product_id')['_user_buy_product_times'].count()
+prd['_prod_buy_second_time_total_cnt'] = priors_orders_detail[priors_orders_detail['_user_buy_product_times'] == 2]\
+    .groupby('product_id')['_user_buy_product_times'].count()
+prd = prd.fillna(0)
+prd = prd.reset_index()
 
 prd['_prod_reorder_prob'] = prd._prod_buy_second_time_total_cnt / prd._prod_buy_first_time_total_cnt
 prd['_prod_reorder_ratio'] = prd._prod_reorder_tot_cnts / prd._prod_tot_cnts
@@ -203,13 +208,14 @@ users = ka_add_groupby_features_1_vs_n(orders[orders.eval_set == 'prior'], ['use
                                             '_user_mean_days_since_prior_order': 'mean'}}
                                        )
 
-us = ka_add_groupby_features_1_vs_n(priors_orders_detail, ['user_id'],
-                                    {'reordered':
-                                         {'_user_reorder_ratio':
-                                              lambda x: sum(priors_orders_detail.ix[x.index, 'reordered'] == 1) / sum(priors_orders_detail.ix[x.index, 'order_number'] > 1)},
-                                     'product_id': {'_user_total_products': 'count',
-                                                    '_user_distinct_products': lambda x: x.nunique()}}
-                                    )
+us = pd.concat([
+    priors_orders_detail.groupby('user_id')['product_id'].count().rename('_user_total_products'),
+    priors_orders_detail.groupby('user_id')['product_id'].nunique().rename('_user_distinct_products'),
+    (priors_orders_detail.groupby('user_id')['reordered'].sum() /
+        priors_orders_detail[priors_orders_detail['order_number'] > 1].groupby('user_id')['order_number'].count()).rename('_user_reorder_ratio')
+], axis=1).reset_index()
+
+
 users = users.merge(us, how='inner')
 
 users['_user_average_basket'] = users._user_total_products / users._user_total_orders
@@ -260,7 +266,7 @@ eval = False
 if eval:
     tresholds = []
     scores = []
-    for i in range(0):
+    for i in range(1):
         train = data.loc[data.eval_set == "train", :]
         train.loc[:, 'reordered'] = train.reordered.fillna(0)
 
@@ -301,7 +307,7 @@ else:
     xgboost.plot_importance(bst)
 
     d_test = xgboost.DMatrix(X_test.drop(['eval_set', 'user_id', 'order_id', 'reordered', 'product_id'], axis=1))
-    X_test.loc[:, 'reordered'] = (bst.predict(d_test) > 0.19).astype(int)
+    X_test.loc[:, 'reordered'] = (bst.predict(d_test) > 0.2).astype(int)
     X_test.loc[:, 'product_id'] = X_test.product_id.astype(str)
     submit = ka_add_groupby_features_n_vs_1(X_test[X_test.reordered == 1],
                                             group_columns_list=['order_id'],
