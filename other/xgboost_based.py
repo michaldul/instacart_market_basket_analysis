@@ -187,12 +187,12 @@ priors_orders_detail.loc[:, '_user_buy_product_times'] = \
 
 prd = ka_add_groupby_features_1_vs_n(priors_orders_detail, ['product_id'],
                                      {'user_id': {'_prod_tot_cnts': 'count'},
-                                       'reordered': {'_prod_reorder_tot_cnts': 'sum'}})
+                                      'reordered': {'_prod_reorder_tot_cnts': 'sum'}})
 
 prd = prd.set_index('product_id')
-prd['_prod_buy_first_time_total_cnt'] = priors_orders_detail[priors_orders_detail['_user_buy_product_times'] == 1]\
+prd['_prod_buy_first_time_total_cnt'] = priors_orders_detail[priors_orders_detail['_user_buy_product_times'] == 1] \
     .groupby('product_id')['_user_buy_product_times'].count()
-prd['_prod_buy_second_time_total_cnt'] = priors_orders_detail[priors_orders_detail['_user_buy_product_times'] == 2]\
+prd['_prod_buy_second_time_total_cnt'] = priors_orders_detail[priors_orders_detail['_user_buy_product_times'] == 2] \
     .groupby('product_id')['_user_buy_product_times'].count()
 prd = prd.fillna(0)
 prd = prd.reset_index()
@@ -212,9 +212,9 @@ us = pd.concat([
     priors_orders_detail.groupby('user_id')['product_id'].count().rename('_user_total_products'),
     priors_orders_detail.groupby('user_id')['product_id'].nunique().rename('_user_distinct_products'),
     (priors_orders_detail.groupby('user_id')['reordered'].sum() /
-        priors_orders_detail[priors_orders_detail['order_number'] > 1].groupby('user_id')['order_number'].count()).rename('_user_reorder_ratio')
+     priors_orders_detail[priors_orders_detail['order_number'] > 1].groupby('user_id')['order_number'].count()).rename(
+        '_user_reorder_ratio')
 ], axis=1).reset_index()
-
 
 users = users.merge(us, how='inner')
 
@@ -224,7 +224,6 @@ us = orders[orders.eval_set != "prior"][['user_id', 'order_id', 'eval_set', 'day
 us.rename(index=str, columns={'days_since_prior_order': 'time_since_last_order'}, inplace=True)
 
 users = users.merge(us, how='inner')
-
 
 data = ka_add_groupby_features_1_vs_n(df=priors_orders_detail,
                                       group_columns_list=['user_id', 'product_id'],
@@ -243,7 +242,11 @@ data['_up_order_rate_since_first_order'] = data._up_order_count / (
 
 # add user_id to train set
 train = train.merge(right=orders[['order_id', 'user_id']], how='left', on='order_id')
+# better approach than "skeleton-building"
 data = data.merge(train[['user_id', 'product_id', 'reordered']], on=['user_id', 'product_id'], how='left')
+
+train = data.loc[data.eval_set == "train", :]
+train.loc[:, 'reordered'] = train.reordered.fillna(0)
 
 del priors_orders_detail, orders
 gc.collect()
@@ -261,18 +264,27 @@ xgb_params = {
     , "lambda": 10
 }
 
+
+FEATURES = ['_up_average_cart_position', '_up_last_order_number',
+            '_up_first_order_number', '_up_order_count', '_prod_reorder_tot_cnts',
+            '_prod_tot_cnts', '_prod_buy_first_time_total_cnt',
+            '_prod_buy_second_time_total_cnt', '_prod_reorder_prob',
+            '_prod_reorder_ratio', '_prod_reorder_times',
+            '_user_sum_days_since_prior_order', '_user_mean_days_since_prior_order',
+            '_user_total_orders', '_user_total_products', '_user_distinct_products',
+            '_user_reorder_ratio', '_user_average_basket', 'time_since_last_order',
+            '_up_order_rate', '_up_order_since_last_order',
+            '_up_order_rate_since_first_order']
+
 eval = False
+
 
 if eval:
     tresholds = []
     scores = []
     for i in range(1):
-        train = data.loc[data.eval_set == "train", :]
-        train.loc[:, 'reordered'] = train.reordered.fillna(0)
-
         train, valid = split_train_df(train)
-        d_train = xgboost.DMatrix(train.drop(['eval_set', 'user_id', 'product_id', 'order_id', 'reordered'], axis=1),
-                                  train.reordered)
+        d_train = xgboost.DMatrix(train[FEATURES], train.reordered)
 
         watchlist = [(d_train, "train")]
         bst = xgboost.train(params=xgb_params, dtrain=d_train, num_boost_round=80, evals=watchlist, verbose_eval=10)
@@ -292,13 +304,9 @@ if eval:
         plt.plot(tresholds, scores)
         plt.show()
 else:
-    train = data.loc[data.eval_set == "train", :]
-    train.drop(['eval_set', 'user_id', 'product_id', 'order_id'], axis=1, inplace=True)
-    train.loc[:, 'reordered'] = train.reordered.fillna(0)
-
     X_test = data.loc[data.eval_set == "test", :]
 
-    X_train, y_train = train.drop('reordered', axis=1), train.reordered
+    X_train, y_train = train[FEATURES], train.reordered
 
     d_train = xgboost.DMatrix(X_train, y_train)
 
@@ -306,7 +314,7 @@ else:
     bst = xgboost.train(params=xgb_params, dtrain=d_train, num_boost_round=80, evals=watchlist, verbose_eval=10)
     xgboost.plot_importance(bst)
 
-    d_test = xgboost.DMatrix(X_test.drop(['eval_set', 'user_id', 'order_id', 'reordered', 'product_id'], axis=1))
+    d_test = xgboost.DMatrix(X_test[FEATURES])
     X_test.loc[:, 'reordered'] = (bst.predict(d_test) > 0.2).astype(int)
     X_test.loc[:, 'product_id'] = X_test.product_id.astype(str)
     submit = ka_add_groupby_features_n_vs_1(X_test[X_test.reordered == 1],
