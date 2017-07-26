@@ -1,12 +1,13 @@
-import gc
 import time
 import numpy as np
 import pandas as pd
 import xgboost
+import winsound
 
 import matplotlib.pyplot as plt
 from decision_tree import group_predicted_products
 from metrics import split_train_df, calc_avg_f1
+from sklearn.metrics import confusion_matrix
 
 
 def load_data(path_data):
@@ -55,24 +56,7 @@ def load_data(path_data):
     return priors, train, orders, products, aisles, departments, sample_submission
 
 
-class tick_tock:
-    def __init__(self, process_name, verbose=1):
-        self.process_name = process_name
-        self.verbose = verbose
-
-    def __enter__(self):
-        if self.verbose:
-            print(self.process_name + " begin ......")
-            self.begin_time = time.time()
-
-    def __exit__(self, type, value, traceback):
-        if self.verbose:
-            end_time = time.time()
-            print(self.process_name + " end ......")
-            print('time lapsing {0} s \n'.format(end_time - self.begin_time))
-
-
-def ka_add_groupby_features_1_vs_n(df, group_columns_list, agg_dict, only_new_feature=True):
+def ka_add_groupby_features_1_vs_n(df, group_columns_list, agg_dict):
     '''Create statistical columns, group by [N columns] and compute stats on [N column]
 
        Parameters
@@ -96,32 +80,17 @@ def ka_add_groupby_features_1_vs_n(df, group_columns_list, agg_dict, only_new_fe
                                               'prod_order_more_than_once':lambda x: sum(x==2)}}
        ka_add_stats_features_1_vs_n(train, ['product_id'], agg_dict)
     '''
-    with tick_tock("add stats features"):
-        try:
-            if type(group_columns_list) == list:
-                pass
-            else:
-                raise TypeError(k + "should be a list")
-        except TypeError as e:
-            print(e)
-            raise
 
-        df_new = df.copy()
-        grouped = df_new.groupby(group_columns_list)
+    grouped = df.groupby(group_columns_list)
 
-        the_stats = grouped.agg(agg_dict)
-        the_stats.columns = the_stats.columns.droplevel(0)
-        the_stats.reset_index(inplace=True)
-        if only_new_feature:
-            df_new = the_stats
-        else:
-            df_new = pd.merge(left=df_new, right=the_stats, on=group_columns_list, how='left')
+    the_stats = grouped.agg(agg_dict)
+    the_stats.columns = the_stats.columns.droplevel(0)
+    the_stats.reset_index(inplace=True)
 
-    return df_new
+    return the_stats
 
 
-def ka_add_groupby_features_n_vs_1(df, group_columns_list, target_columns_list, methods_list, keep_only_stats=True,
-                                   verbose=1):
+def ka_add_groupby_features_n_vs_1(df, group_columns_list, target_columns_list, methods_list):
     '''Create statistical columns, group by [N columns] and compute stats on [1 column]
 
        Parameters
@@ -143,40 +112,24 @@ def ka_add_groupby_features_n_vs_1(df, group_columns_list, target_columns_list, 
        -------
        ka_add_stats_features_n_vs_1(train, group_columns_list=['x0'], target_columns_list=['x10'])
     '''
-    with tick_tock("add stats features", verbose):
-        dicts = {"group_columns_list": group_columns_list, "target_columns_list": target_columns_list,
-                 "methods_list": methods_list}
 
-        for k, v in dicts.items():
-            try:
-                if type(v) == list:
-                    pass
-                else:
-                    raise TypeError(k + "should be a list")
-            except TypeError as e:
-                print(e)
-                raise
+    grouped_name = ''.join(group_columns_list)
+    target_name = ''.join(target_columns_list)
+    combine_name = [[grouped_name] + [method_name] + [target_name] for method_name in methods_list]
 
-        grouped_name = ''.join(group_columns_list)
-        target_name = ''.join(target_columns_list)
-        combine_name = [[grouped_name] + [method_name] + [target_name] for method_name in methods_list]
+    grouped = df.groupby(group_columns_list)
 
-        df_new = df.copy()
-        grouped = df_new.groupby(group_columns_list)
-
-        the_stats = grouped[target_name].agg(methods_list).reset_index()
-        the_stats.columns = [grouped_name] + \
-                            ['_%s_%s_by_%s' % (grouped_name, method_name, target_name) \
-                             for (grouped_name, method_name, target_name) in combine_name]
-        if keep_only_stats:
-            return the_stats
-        else:
-            df_new = pd.merge(left=df_new, right=the_stats, on=group_columns_list, how='left')
-        return df_new
+    the_stats = grouped[target_name].agg(methods_list).reset_index()
+    the_stats.columns = [grouped_name] + \
+                        ['_%s_%s_by_%s' % (grouped_name, method_name, target_name) \
+                         for (grouped_name, method_name, target_name) in combine_name]
+    return the_stats
 
 
 path_data = 'input/'
 priors, train, orders, products, aisles, departments, sample_submission = load_data(path_data)
+
+orders['days_since_first_order'] = orders.groupby('user_id')['days_since_prior_order'].cumsum().fillna(0)
 
 # Products information ----------------------------------------------------------------
 # add order information to priors set
@@ -208,6 +161,8 @@ users = ka_add_groupby_features_1_vs_n(orders[orders.eval_set == 'prior'], ['use
                                             '_user_mean_days_since_prior_order': 'mean'}}
                                        )
 
+users = pd.merge(users, orders[orders.eval_set != 'prior'][['user_id', 'days_since_first_order']])
+
 us = pd.concat([
     priors_orders_detail.groupby('user_id')['product_id'].count().rename('_user_total_products'),
     priors_orders_detail.groupby('user_id')['product_id'].nunique().rename('_user_distinct_products'),
@@ -230,8 +185,7 @@ data = ka_add_groupby_features_1_vs_n(df=priors_orders_detail,
                                       agg_dict={'order_number': {'_up_order_count': 'count',
                                                                  '_up_first_order_number': 'min',
                                                                  '_up_last_order_number': 'max'},
-                                                'add_to_cart_order': {'_up_average_cart_position': 'mean'}}
-                                      )
+                                                'add_to_cart_order': {'_up_average_cart_position': 'mean'}})
 
 data = data.merge(prd, how='inner', on='product_id').merge(users, how='inner', on='user_id')
 
@@ -240,16 +194,27 @@ data['_up_order_since_last_order'] = data._user_total_orders - data._up_last_ord
 data['_up_order_rate_since_first_order'] = data._up_order_count / (
     data._user_total_orders - data._up_first_order_number + 1)
 
+
 # add user_id to train set
 train = train.merge(right=orders[['order_id', 'user_id']], how='left', on='order_id')
 # better approach than "skeleton-building"
 data = data.merge(train[['user_id', 'product_id', 'reordered']], on=['user_id', 'product_id'], how='left')
 
+
+# add features related to frequency of buying product by the client
+product_orders_intervals = pd.read_csv('processed/product_orders_intervals.csv')[
+    ['user_id','product_id','product_prior_order_day','avg_interval','interval_std','n_intervals']]
+data = pd.merge(data, product_orders_intervals, on=['user_id', 'product_id'], how='left')
+
+data['user_product_frequency_indicator'] = (data['n_intervals'] > 5) & (data['avg_interval'] > (4 * data['interval_std'])) & \
+                               ((data['days_since_first_order'] - data['product_prior_order_day']) > (data['avg_interval'] - 2*data['interval_std'])) & \
+                               ((data['days_since_first_order'] - data['product_prior_order_day']) < (data['avg_interval'] + 2*data['interval_std']))
+
+
 train = data.loc[data.eval_set == "train", :]
 train.loc[:, 'reordered'] = train.reordered.fillna(0)
 
-del priors_orders_detail, orders
-gc.collect()
+X_test = data.loc[data.eval_set == "test", :]
 
 xgb_params = {
     "objective": "reg:logistic"
@@ -277,6 +242,12 @@ FEATURES = ['_up_average_cart_position', '_up_last_order_number',
             '_up_order_rate_since_first_order']
 
 eval = False
+print_confusion_matrix = True
+
+def beep():
+    winsound.Beep(1200, 500)
+    winsound.Beep(1500, 200)
+    winsound.Beep(2500, 100)
 
 
 if eval:
@@ -290,37 +261,41 @@ if eval:
         bst = xgboost.train(params=xgb_params, dtrain=d_train, num_boost_round=80, evals=watchlist, verbose_eval=10)
         # xgboost.plot_importance(bst)
 
-        d_test = xgboost.DMatrix(valid.drop(['eval_set', 'user_id', 'product_id', 'order_id', 'reordered'], axis=1))
-        treshold = 0.19 + i * 0.01
-        valid['prediction'] = (bst.predict(d_test) > treshold).astype(int)
+        d_test = xgboost.DMatrix(valid[FEATURES])
+        treshold = 0.20 + i * 0.01
 
-        score = calc_avg_f1(group_predicted_products(valid, 'reordered'),
-                            group_predicted_products(valid, prediction_column='prediction'))
+        predicted = (bst.predict(d_test) > treshold)
+        valid['prediction'] = (predicted | valid['user_product_frequency_indicator']).astype(int)
+
+        if print_confusion_matrix:
+            print(confusion_matrix(valid['reordered'], valid['prediction']))
+
+        avg_f1_score = calc_avg_f1(group_predicted_products(valid, 'reordered'),
+                                   group_predicted_products(valid, prediction_column='prediction'))
         tresholds.append(treshold)
-        scores.append(score)
+        scores.append(avg_f1_score)
 
         print(scores)
+        beep()
+
     if len(scores) > 1:
         plt.plot(tresholds, scores)
         plt.show()
 else:
-    X_test = data.loc[data.eval_set == "test", :]
-
     X_train, y_train = train[FEATURES], train.reordered
-
     d_train = xgboost.DMatrix(X_train, y_train)
 
     watchlist = [(d_train, "train")]
     bst = xgboost.train(params=xgb_params, dtrain=d_train, num_boost_round=80, evals=watchlist, verbose_eval=10)
-    xgboost.plot_importance(bst)
+    # xgboost.plot_importance(bst)
 
     d_test = xgboost.DMatrix(X_test[FEATURES])
-    X_test.loc[:, 'reordered'] = (bst.predict(d_test) > 0.2).astype(int)
+    X_test.loc[:, 'reordered'] = ((bst.predict(d_test) > 0.2) | X_test['user_product_frequency_indicator']).astype(int)
     X_test.loc[:, 'product_id'] = X_test.product_id.astype(str)
     submit = ka_add_groupby_features_n_vs_1(X_test[X_test.reordered == 1],
                                             group_columns_list=['order_id'],
                                             target_columns_list=['product_id'],
-                                            methods_list=[lambda x: ' '.join(set(x))], keep_only_stats=True)
+                                            methods_list=[lambda x: ' '.join(set(x))])
     submit.columns = sample_submission.columns.tolist()
     submit_final = sample_submission[['order_id']].merge(submit, how='left').fillna('None')
     submit_final.to_csv("xgboost.csv", index=False)
