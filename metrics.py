@@ -1,5 +1,6 @@
 import pandas as pd
-from sklearn.model_selection import train_test_split
+import random
+from sklearn.model_selection import train_test_split, KFold
 
 
 def calc_f1(y_true, y_pred):
@@ -35,3 +36,13 @@ def split_train_df(train_df):
     test = train_df[train_df['order_id'].isin(test_orders)]
 
     return train, test
+
+
+def kfold_split(train_df, k=5):
+    orders = train_df['order_id'].unique()
+    random.shuffle(orders)
+    kf = KFold(n_splits=k)
+    for train, test in kf.split(orders):
+        yield train_df[train_df['order_id'].isin(orders[train])], \
+              train_df[train_df['order_id'].isin(orders[test])]
+

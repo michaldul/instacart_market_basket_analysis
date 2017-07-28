@@ -1,13 +1,14 @@
-import time
-import numpy as np
-import pandas as pd
-import xgboost
 import winsound
 
 import matplotlib.pyplot as plt
-from decision_tree import group_predicted_products
-from metrics import split_train_df, calc_avg_f1
+import seaborn as sns
+import numpy as np
+import pandas as pd
+import xgboost
 from sklearn.metrics import confusion_matrix
+
+from decision_tree import group_predicted_products
+from metrics import split_train_df, calc_avg_f1, kfold_split
 
 
 def load_data(path_data):
@@ -126,6 +127,12 @@ def ka_add_groupby_features_n_vs_1(df, group_columns_list, target_columns_list, 
     return the_stats
 
 
+def get_UP_relative_streak_feature():
+    streak_df = pd.read_csv('./processed/product_streak.csv')
+    streak_df['UP_relative_streak'] = streak_df['product_streak_last_order'] / streak_df['number_of_client_orders']
+    return streak_df[['user_id', 'product_id', 'UP_relative_streak']]
+
+
 path_data = 'input/'
 priors, train, orders, products, aisles, departments, sample_submission = load_data(path_data)
 
@@ -189,11 +196,12 @@ data = ka_add_groupby_features_1_vs_n(df=priors_orders_detail,
 
 data = data.merge(prd, how='inner', on='product_id').merge(users, how='inner', on='user_id')
 
+data = data.merge(get_UP_relative_streak_feature())
+
 data['_up_order_rate'] = data._up_order_count / data._user_total_orders
 data['_up_order_since_last_order'] = data._user_total_orders - data._up_last_order_number
 data['_up_order_rate_since_first_order'] = data._up_order_count / (
     data._user_total_orders - data._up_first_order_number + 1)
-
 
 # add user_id to train set
 train = train.merge(right=orders[['order_id', 'user_id']], how='left', on='order_id')
@@ -216,6 +224,25 @@ train.loc[:, 'reordered'] = train.reordered.fillna(0)
 
 X_test = data.loc[data.eval_set == "test", :]
 
+
+def beep():
+    winsound.Beep(1200, 500)
+    winsound.Beep(1500, 200)
+    winsound.Beep(2500, 100)
+
+
+def compare_scores_plot(*cv_scores):
+    for scores, color in zip(cv_scores, sns.color_palette("Set1", n_colors=len(cv_scores))):
+        plot_kfold_scores(scores, color=color, plot_immediately=False)
+    plt.plot()
+
+
+def plot_kfold_scores(cv_scores, color='blue', plot_immediately=True):
+    plt.scatter(range(len(cv_scores)), cv_scores, c=color)
+    plt.axhline(y=np.mean(cv_scores), xmin=0, xmax=len(cv_scores), c=color)
+    if plot_immediately:
+        plt.show()
+
 xgb_params = {
     "objective": "reg:logistic"
     , "eval_metric": "logloss"
@@ -227,8 +254,9 @@ xgb_params = {
     , "colsample_bytree": 0.95
     , "alpha": 2e-05
     , "lambda": 10
-}
+    # , 'updater': 'grow_gpu'
 
+}
 
 FEATURES = ['_up_average_cart_position', '_up_last_order_number',
             '_up_first_order_number', '_up_order_count', '_prod_reorder_tot_cnts',
@@ -239,48 +267,58 @@ FEATURES = ['_up_average_cart_position', '_up_last_order_number',
             '_user_total_orders', '_user_total_products', '_user_distinct_products',
             '_user_reorder_ratio', '_user_average_basket', 'time_since_last_order',
             '_up_order_rate', '_up_order_since_last_order',
-            '_up_order_rate_since_first_order']
+            '_up_order_rate_since_first_order']#, 'UP_relative_streak']
+
+CLASSIFIER_THRESHOLD = 0.2
 
 eval = False
-print_confusion_matrix = True
-
-def beep():
-    winsound.Beep(1200, 500)
-    winsound.Beep(1500, 200)
-    winsound.Beep(2500, 100)
-
+kfold_valid = True
+print_confusion_matrix = False
 
 if eval:
-    tresholds = []
-    scores = []
-    for i in range(1):
-        train, valid = split_train_df(train)
-        d_train = xgboost.DMatrix(train[FEATURES], train.reordered)
+    if kfold_valid:
+        scores = []
+
+        for valid_train, valid_test in kfold_split(train, 6):
+            d_train = xgboost.DMatrix(valid_train[FEATURES], valid_train.reordered)
+
+            watchlist = [(d_train, "train")]
+            bst = xgboost.train(params=xgb_params, dtrain=d_train, num_boost_round=80, evals=watchlist, verbose_eval=10)
+
+            d_test = xgboost.DMatrix(valid_test[FEATURES])
+
+            predicted = (bst.predict(d_test) > CLASSIFIER_THRESHOLD)
+            valid_test['prediction'] = (predicted | valid_test['user_product_frequency_indicator']).astype(int)
+
+            if print_confusion_matrix:
+                print(confusion_matrix(valid_test['reordered'], valid_test['prediction']))
+
+            avg_f1_score = calc_avg_f1(group_predicted_products(valid_test, 'reordered'),
+                                       group_predicted_products(valid_test, prediction_column='prediction'))
+            print(avg_f1_score)
+            scores.append(avg_f1_score)
+
+        plot_kfold_scores(scores)
+        beep()
+    else:
+        valid_train, valid_test = split_train_df(train)
+        d_train = xgboost.DMatrix(valid_train[FEATURES], valid_train.reordered)
 
         watchlist = [(d_train, "train")]
         bst = xgboost.train(params=xgb_params, dtrain=d_train, num_boost_round=80, evals=watchlist, verbose_eval=10)
-        # xgboost.plot_importance(bst)
 
-        d_test = xgboost.DMatrix(valid[FEATURES])
-        treshold = 0.20 + i * 0.01
+        d_test = xgboost.DMatrix(valid_test[FEATURES])
 
-        predicted = (bst.predict(d_test) > treshold)
-        valid['prediction'] = (predicted | valid['user_product_frequency_indicator']).astype(int)
+        predicted = (bst.predict(d_test) > CLASSIFIER_THRESHOLD)
+        valid_test['prediction'] = (predicted | valid_test['user_product_frequency_indicator']).astype(int)
 
         if print_confusion_matrix:
-            print(confusion_matrix(valid['reordered'], valid['prediction']))
+            print(confusion_matrix(valid_test['reordered'], valid_test['prediction']))
 
-        avg_f1_score = calc_avg_f1(group_predicted_products(valid, 'reordered'),
-                                   group_predicted_products(valid, prediction_column='prediction'))
-        tresholds.append(treshold)
-        scores.append(avg_f1_score)
-
-        print(scores)
+        avg_f1_score = calc_avg_f1(group_predicted_products(valid_test, 'reordered'),
+                                   group_predicted_products(valid_test, prediction_column='prediction'))
+        print(avg_f1_score)
         beep()
-
-    if len(scores) > 1:
-        plt.plot(tresholds, scores)
-        plt.show()
 else:
     X_train, y_train = train[FEATURES], train.reordered
     d_train = xgboost.DMatrix(X_train, y_train)
@@ -290,7 +328,7 @@ else:
     # xgboost.plot_importance(bst)
 
     d_test = xgboost.DMatrix(X_test[FEATURES])
-    X_test.loc[:, 'reordered'] = ((bst.predict(d_test) > 0.2) | X_test['user_product_frequency_indicator']).astype(int)
+    X_test.loc[:, 'reordered'] = ((bst.predict(d_test) > CLASSIFIER_THRESHOLD) | X_test['user_product_frequency_indicator']).astype(int)
     X_test.loc[:, 'product_id'] = X_test.product_id.astype(str)
     submit = ka_add_groupby_features_n_vs_1(X_test[X_test.reordered == 1],
                                             group_columns_list=['order_id'],
