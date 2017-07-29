@@ -1,7 +1,3 @@
-import winsound
-
-import matplotlib.pyplot as plt
-import seaborn as sns
 import numpy as np
 import pandas as pd
 import xgboost
@@ -9,6 +5,9 @@ from sklearn.metrics import confusion_matrix
 
 from decision_tree import group_predicted_products
 from metrics import split_train_df, calc_avg_f1, kfold_split
+from plots import plot_kfold_scores
+from sounds import beep
+
 
 
 def load_data(path_data):
@@ -133,154 +132,160 @@ def get_UP_relative_streak_feature():
     return streak_df[['user_id', 'product_id', 'UP_relative_streak']]
 
 
-path_data = 'input/'
-priors, train, orders, products, aisles, departments, sample_submission = load_data(path_data)
+if __name__ == '__main__':
+    path_data = 'input/'
+    priors, train, orders, products, aisles, departments, sample_submission = load_data(path_data)
 
-orders['days_since_first_order'] = orders.groupby('user_id')['days_since_prior_order'].cumsum().fillna(0)
+    orders['days_since_first_order'] = orders.groupby('user_id')['days_since_prior_order'].cumsum().fillna(0)
 
-# Products information ----------------------------------------------------------------
-# add order information to priors set
-priors_orders_detail = orders.merge(right=priors, how='inner', on='order_id')
+    # Products information ----------------------------------------------------------------
+    # add order information to priors set
+    priors_orders_detail = orders.merge(right=priors, how='inner', on='order_id')
 
-priors_orders_detail.loc[:, '_user_buy_product_times'] = \
-    priors_orders_detail.groupby(['user_id', 'product_id']).cumcount() + 1
+    priors_orders_detail.loc[:, '_user_buy_product_times'] = \
+        priors_orders_detail.groupby(['user_id', 'product_id']).cumcount() + 1
 
-prd = ka_add_groupby_features_1_vs_n(priors_orders_detail, ['product_id'],
-                                     {'user_id': {'_prod_tot_cnts': 'count'},
-                                      'reordered': {'_prod_reorder_tot_cnts': 'sum'}})
+    prd = ka_add_groupby_features_1_vs_n(priors_orders_detail, ['product_id'],
+                                         {'user_id': {'_prod_tot_cnts': 'count'},
+                                          'reordered': {'_prod_reorder_tot_cnts': 'sum'}})
 
-prd = prd.set_index('product_id')
-prd['_prod_buy_first_time_total_cnt'] = priors_orders_detail[priors_orders_detail['_user_buy_product_times'] == 1] \
-    .groupby('product_id')['_user_buy_product_times'].count()
-prd['_prod_buy_second_time_total_cnt'] = priors_orders_detail[priors_orders_detail['_user_buy_product_times'] == 2] \
-    .groupby('product_id')['_user_buy_product_times'].count()
-prd = prd.fillna(0)
-prd = prd.reset_index()
+    prd = prd.set_index('product_id')
+    prd['_prod_buy_first_time_total_cnt'] = priors_orders_detail[priors_orders_detail['_user_buy_product_times'] == 1] \
+        .groupby('product_id')['_user_buy_product_times'].count()
+    prd['_prod_buy_second_time_total_cnt'] = priors_orders_detail[priors_orders_detail['_user_buy_product_times'] == 2] \
+        .groupby('product_id')['_user_buy_product_times'].count()
+    prd = prd.fillna(0)
+    prd = prd.reset_index()
 
-prd['_prod_reorder_prob'] = prd._prod_buy_second_time_total_cnt / prd._prod_buy_first_time_total_cnt
-prd['_prod_reorder_ratio'] = prd._prod_reorder_tot_cnts / prd._prod_tot_cnts
-prd['_prod_reorder_times'] = 1 + prd._prod_reorder_tot_cnts / prd._prod_buy_first_time_total_cnt
+    prd['_prod_reorder_prob'] = prd._prod_buy_second_time_total_cnt / prd._prod_buy_first_time_total_cnt
+    prd['_prod_reorder_ratio'] = prd._prod_reorder_tot_cnts / prd._prod_tot_cnts
+    prd['_prod_reorder_times'] = 1 + prd._prod_reorder_tot_cnts / prd._prod_buy_first_time_total_cnt
 
-users = ka_add_groupby_features_1_vs_n(orders[orders.eval_set == 'prior'], ['user_id'],
-                                       {'order_number': {'_user_total_orders': 'max'},
-                                        'days_since_prior_order': {
-                                            '_user_sum_days_since_prior_order': 'sum',
-                                            '_user_mean_days_since_prior_order': 'mean'}}
-                                       )
+    users = ka_add_groupby_features_1_vs_n(orders[orders.eval_set == 'prior'], ['user_id'],
+                                           {'order_number': {'_user_total_orders': 'max'},
+                                            'days_since_prior_order': {
+                                                '_user_sum_days_since_prior_order': 'sum',
+                                                '_user_mean_days_since_prior_order': 'mean'}}
+                                           )
 
-users = pd.merge(users, orders[orders.eval_set != 'prior'][['user_id', 'days_since_first_order']])
+    users = pd.merge(users, orders[orders.eval_set != 'prior'][['user_id', 'days_since_first_order']])
 
-us = pd.concat([
-    priors_orders_detail.groupby('user_id')['product_id'].count().rename('_user_total_products'),
-    priors_orders_detail.groupby('user_id')['product_id'].nunique().rename('_user_distinct_products'),
-    (priors_orders_detail.groupby('user_id')['reordered'].sum() /
-     priors_orders_detail[priors_orders_detail['order_number'] > 1].groupby('user_id')['order_number'].count()).rename(
-        '_user_reorder_ratio')
-], axis=1).reset_index()
+    us = pd.concat([
+        priors_orders_detail.groupby('user_id')['product_id'].count().rename('_user_total_products'),
+        priors_orders_detail.groupby('user_id')['product_id'].nunique().rename('_user_distinct_products'),
+        (priors_orders_detail.groupby('user_id')['reordered'].sum() /
+         priors_orders_detail[priors_orders_detail['order_number'] > 1].groupby('user_id')['order_number'].count()).rename(
+            '_user_reorder_ratio')
+    ], axis=1).reset_index()
 
-users = users.merge(us, how='inner')
+    users = users.merge(us, how='inner')
 
-users['_user_average_basket'] = users._user_total_products / users._user_total_orders
+    users['_user_average_basket'] = users._user_total_products / users._user_total_orders
 
-us = orders[orders.eval_set != "prior"][['user_id', 'order_id', 'eval_set', 'days_since_prior_order']]
-us.rename(index=str, columns={'days_since_prior_order': 'time_since_last_order'}, inplace=True)
+    us = orders[orders.eval_set != "prior"][['user_id', 'order_id', 'eval_set', 'days_since_prior_order']]
+    us.rename(index=str, columns={'days_since_prior_order': 'time_since_last_order'}, inplace=True)
 
-users = users.merge(us, how='inner')
+    users = users.merge(us, how='inner')
 
-data = ka_add_groupby_features_1_vs_n(df=priors_orders_detail,
-                                      group_columns_list=['user_id', 'product_id'],
-                                      agg_dict={'order_number': {'_up_order_count': 'count',
-                                                                 '_up_first_order_number': 'min',
-                                                                 '_up_last_order_number': 'max'},
-                                                'add_to_cart_order': {'_up_average_cart_position': 'mean'}})
+    data = ka_add_groupby_features_1_vs_n(df=priors_orders_detail,
+                                          group_columns_list=['user_id', 'product_id'],
+                                          agg_dict={'order_number': {'_up_order_count': 'count',
+                                                                     '_up_first_order_number': 'min',
+                                                                     '_up_last_order_number': 'max'},
+                                                    'add_to_cart_order': {'_up_average_cart_position': 'mean'}})
 
-data = data.merge(prd, how='inner', on='product_id').merge(users, how='inner', on='user_id')
+    data = data.merge(prd, how='inner', on='product_id').merge(users, how='inner', on='user_id')
 
-data = data.merge(get_UP_relative_streak_feature())
+    data = data.merge(get_UP_relative_streak_feature())
 
-data['_up_order_rate'] = data._up_order_count / data._user_total_orders
-data['_up_order_since_last_order'] = data._user_total_orders - data._up_last_order_number
-data['_up_order_rate_since_first_order'] = data._up_order_count / (
-    data._user_total_orders - data._up_first_order_number + 1)
+    data['_up_order_rate'] = data._up_order_count / data._user_total_orders
+    data['_up_order_since_last_order'] = data._user_total_orders - data._up_last_order_number
+    data['_up_order_rate_since_first_order'] = data._up_order_count / (
+        data._user_total_orders - data._up_first_order_number + 1)
 
-# add user_id to train set
-train = train.merge(right=orders[['order_id', 'user_id']], how='left', on='order_id')
-# better approach than "skeleton-building"
-data = data.merge(train[['user_id', 'product_id', 'reordered']], on=['user_id', 'product_id'], how='left')
-
-
-# add features related to frequency of buying product by the client
-product_orders_intervals = pd.read_csv('processed/product_orders_intervals.csv')[
-    ['user_id','product_id','product_prior_order_day','avg_interval','interval_std','n_intervals']]
-data = pd.merge(data, product_orders_intervals, on=['user_id', 'product_id'], how='left')
-
-data['user_product_frequency_indicator'] = (data['n_intervals'] > 5) & (data['avg_interval'] > (4 * data['interval_std'])) & \
-                               ((data['days_since_first_order'] - data['product_prior_order_day']) > (data['avg_interval'] - 2*data['interval_std'])) & \
-                               ((data['days_since_first_order'] - data['product_prior_order_day']) < (data['avg_interval'] + 2*data['interval_std']))
+    # add user_id to train set
+    train = train.merge(right=orders[['order_id', 'user_id']], how='left', on='order_id')
+    # better approach than "skeleton-building"
+    data = data.merge(train[['user_id', 'product_id', 'reordered']], on=['user_id', 'product_id'], how='left')
 
 
-train = data.loc[data.eval_set == "train", :]
-train.loc[:, 'reordered'] = train.reordered.fillna(0)
+    # add features related to frequency of buying product by the client
+    product_orders_intervals = pd.read_csv('processed/product_orders_intervals.csv')[
+        ['user_id','product_id','product_prior_order_day','avg_interval','interval_std','n_intervals']]
+    data = pd.merge(data, product_orders_intervals, on=['user_id', 'product_id'], how='left')
 
-X_test = data.loc[data.eval_set == "test", :]
-
-
-def beep():
-    winsound.Beep(1200, 500)
-    winsound.Beep(1500, 200)
-    winsound.Beep(2500, 100)
+    data['user_product_frequency_indicator'] = (data['n_intervals'] > 5) & (data['avg_interval'] > (4 * data['interval_std'])) & \
+                                   ((data['days_since_first_order'] - data['product_prior_order_day']) > (data['avg_interval'] - 2*data['interval_std'])) & \
+                                   ((data['days_since_first_order'] - data['product_prior_order_day']) < (data['avg_interval'] + 2*data['interval_std']))
 
 
-def compare_scores_plot(*cv_scores):
-    for scores, color in zip(cv_scores, sns.color_palette("Set1", n_colors=len(cv_scores))):
-        plot_kfold_scores(scores, color=color, plot_immediately=False)
-    plt.plot()
+    train = data.loc[data.eval_set == "train", :]
+    train.loc[:, 'reordered'] = train.reordered.fillna(0)
 
+    X_test = data.loc[data.eval_set == "test", :]
 
-def plot_kfold_scores(cv_scores, color='blue', plot_immediately=True):
-    plt.scatter(range(len(cv_scores)), cv_scores, c=color)
-    plt.axhline(y=np.mean(cv_scores), xmin=0, xmax=len(cv_scores), c=color)
-    if plot_immediately:
-        plt.show()
+    xgb_params = {
+        "objective": "reg:logistic"
+        , "eval_metric": "logloss"
+        , "eta": 0.1
+        , "max_depth": 6
+        , "min_child_weight": 10
+        , "gamma": 0.70
+        , "subsample": 0.76
+        , "colsample_bytree": 0.95
+        , "alpha": 2e-05
+        , "lambda": 10
+        # , 'updater': 'grow_gpu'
 
-xgb_params = {
-    "objective": "reg:logistic"
-    , "eval_metric": "logloss"
-    , "eta": 0.1
-    , "max_depth": 6
-    , "min_child_weight": 10
-    , "gamma": 0.70
-    , "subsample": 0.76
-    , "colsample_bytree": 0.95
-    , "alpha": 2e-05
-    , "lambda": 10
-    # , 'updater': 'grow_gpu'
+    }
 
-}
+    FEATURES = ['_up_average_cart_position', '_up_last_order_number',
+                '_up_first_order_number', '_up_order_count', '_prod_reorder_tot_cnts',
+                '_prod_tot_cnts', '_prod_buy_first_time_total_cnt',
+                '_prod_buy_second_time_total_cnt', '_prod_reorder_prob',
+                '_prod_reorder_ratio', '_prod_reorder_times',
+                '_user_sum_days_since_prior_order', '_user_mean_days_since_prior_order',
+                '_user_total_orders', '_user_total_products', '_user_distinct_products',
+                '_user_reorder_ratio', '_user_average_basket', 'time_since_last_order',
+                '_up_order_rate', '_up_order_since_last_order',
+                '_up_order_rate_since_first_order']#, 'UP_relative_streak']
 
-FEATURES = ['_up_average_cart_position', '_up_last_order_number',
-            '_up_first_order_number', '_up_order_count', '_prod_reorder_tot_cnts',
-            '_prod_tot_cnts', '_prod_buy_first_time_total_cnt',
-            '_prod_buy_second_time_total_cnt', '_prod_reorder_prob',
-            '_prod_reorder_ratio', '_prod_reorder_times',
-            '_user_sum_days_since_prior_order', '_user_mean_days_since_prior_order',
-            '_user_total_orders', '_user_total_products', '_user_distinct_products',
-            '_user_reorder_ratio', '_user_average_basket', 'time_since_last_order',
-            '_up_order_rate', '_up_order_since_last_order',
-            '_up_order_rate_since_first_order']#, 'UP_relative_streak']
+    TARGET_FEATURE = 'reordered'
 
-CLASSIFIER_THRESHOLD = 0.2
+    CLASSIFIER_THRESHOLD = 0.2
 
-eval = False
-kfold_valid = True
-print_confusion_matrix = False
+    eval = False
+    kfold_valid = True
+    print_confusion_matrix = False
 
-if eval:
-    if kfold_valid:
-        scores = []
+    if eval:
+        if kfold_valid:
+            scores = []
 
-        for valid_train, valid_test in kfold_split(train, 6):
-            d_train = xgboost.DMatrix(valid_train[FEATURES], valid_train.reordered)
+            for valid_train, valid_test in kfold_split(train, 6):
+                d_train = xgboost.DMatrix(valid_train[FEATURES], valid_train[TARGET_FEATURE])
+
+                watchlist = [(d_train, "train")]
+                bst = xgboost.train(params=xgb_params, dtrain=d_train, num_boost_round=80, evals=watchlist, verbose_eval=10)
+
+                d_test = xgboost.DMatrix(valid_test[FEATURES])
+
+                predicted = (bst.predict(d_test) > CLASSIFIER_THRESHOLD)
+                valid_test['prediction'] = (predicted | valid_test['user_product_frequency_indicator']).astype(int)
+
+                if print_confusion_matrix:
+                    print(confusion_matrix(valid_test[TARGET_FEATURE], valid_test['prediction']))
+
+                avg_f1_score = calc_avg_f1(group_predicted_products(valid_test, TARGET_FEATURE),
+                                           group_predicted_products(valid_test, prediction_column='prediction'))
+                print(avg_f1_score)
+                scores.append(avg_f1_score)
+
+            plot_kfold_scores(scores)
+            beep()
+        else:
+            valid_train, valid_test = split_train_df(train)
+            d_train = xgboost.DMatrix(valid_train[FEATURES], valid_train[TARGET_FEATURE])
 
             watchlist = [(d_train, "train")]
             bst = xgboost.train(params=xgb_params, dtrain=d_train, num_boost_round=80, evals=watchlist, verbose_eval=10)
@@ -291,49 +296,27 @@ if eval:
             valid_test['prediction'] = (predicted | valid_test['user_product_frequency_indicator']).astype(int)
 
             if print_confusion_matrix:
-                print(confusion_matrix(valid_test['reordered'], valid_test['prediction']))
+                print(confusion_matrix(valid_test[TARGET_FEATURE], valid_test['prediction']))
 
-            avg_f1_score = calc_avg_f1(group_predicted_products(valid_test, 'reordered'),
+            avg_f1_score = calc_avg_f1(group_predicted_products(valid_test, TARGET_FEATURE),
                                        group_predicted_products(valid_test, prediction_column='prediction'))
             print(avg_f1_score)
-            scores.append(avg_f1_score)
-
-        plot_kfold_scores(scores)
-        beep()
+            beep()
     else:
-        valid_train, valid_test = split_train_df(train)
-        d_train = xgboost.DMatrix(valid_train[FEATURES], valid_train.reordered)
+        X_train, y_train = train[FEATURES], train[TARGET_FEATURE]
+        d_train = xgboost.DMatrix(X_train, y_train)
 
         watchlist = [(d_train, "train")]
         bst = xgboost.train(params=xgb_params, dtrain=d_train, num_boost_round=80, evals=watchlist, verbose_eval=10)
+        # xgboost.plot_importance(bst)
 
-        d_test = xgboost.DMatrix(valid_test[FEATURES])
-
-        predicted = (bst.predict(d_test) > CLASSIFIER_THRESHOLD)
-        valid_test['prediction'] = (predicted | valid_test['user_product_frequency_indicator']).astype(int)
-
-        if print_confusion_matrix:
-            print(confusion_matrix(valid_test['reordered'], valid_test['prediction']))
-
-        avg_f1_score = calc_avg_f1(group_predicted_products(valid_test, 'reordered'),
-                                   group_predicted_products(valid_test, prediction_column='prediction'))
-        print(avg_f1_score)
-        beep()
-else:
-    X_train, y_train = train[FEATURES], train.reordered
-    d_train = xgboost.DMatrix(X_train, y_train)
-
-    watchlist = [(d_train, "train")]
-    bst = xgboost.train(params=xgb_params, dtrain=d_train, num_boost_round=80, evals=watchlist, verbose_eval=10)
-    # xgboost.plot_importance(bst)
-
-    d_test = xgboost.DMatrix(X_test[FEATURES])
-    X_test.loc[:, 'reordered'] = ((bst.predict(d_test) > CLASSIFIER_THRESHOLD) | X_test['user_product_frequency_indicator']).astype(int)
-    X_test.loc[:, 'product_id'] = X_test.product_id.astype(str)
-    submit = ka_add_groupby_features_n_vs_1(X_test[X_test.reordered == 1],
-                                            group_columns_list=['order_id'],
-                                            target_columns_list=['product_id'],
-                                            methods_list=[lambda x: ' '.join(set(x))])
-    submit.columns = sample_submission.columns.tolist()
-    submit_final = sample_submission[['order_id']].merge(submit, how='left').fillna('None')
-    submit_final.to_csv("xgboost.csv", index=False)
+        d_test = xgboost.DMatrix(X_test[FEATURES])
+        X_test.loc[:, TARGET_FEATURE] = ((bst.predict(d_test) > CLASSIFIER_THRESHOLD) | X_test['user_product_frequency_indicator']).astype(int)
+        X_test.loc[:, 'product_id'] = X_test.product_id.astype(str)
+        submit = ka_add_groupby_features_n_vs_1(X_test[X_test[TARGET_FEATURE] == 1],
+                                                group_columns_list=['order_id'],
+                                                target_columns_list=['product_id'],
+                                                methods_list=[lambda x: ' '.join(set(x))])
+        submit.columns = sample_submission.columns.tolist()
+        submit_final = sample_submission[['order_id']].merge(submit, how='left').fillna('None')
+        submit_final.to_csv("xgboost.csv", index=False)
