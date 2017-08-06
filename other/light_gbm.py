@@ -14,7 +14,7 @@ import lightgbm as lgb
 
 from metrics import split_train_df, calc_avg_f1
 
-IDIR = '../input/'
+IDIR = 'input/'
 
 
 print('loading prior')
@@ -208,7 +208,7 @@ params = {
 }
 ROUNDS = 100
 
-TRESHOLD = 0.22  # guess, should be tuned with crossval on a subset of train data
+TRESHOLD = 0.18
 
 df_train, labels = features(train_orders, labels_given=True)
 
@@ -220,28 +220,37 @@ f_to_use = ['user_total_orders', 'user_total_items', 'total_distinct_items',
             'UP_average_pos_in_cart', 'UP_reorder_rate', 'UP_orders_since_last',
             'UP_delta_hour_vs_last']  # 'dow', 'UP_same_dow_as_last_order'
 
-eval = True
+eval = False
 
 if eval:
-    print('local evaluation of the model')
-    df_train['Y'] = labels
-    train_local, valid_local = split_train_df(df_train)
-    d_train = lgb.Dataset(train_local[f_to_use],
-                          label=train_local['Y'],
-                          categorical_feature=['aisle_id', 'department_id'])
-    print('light GBM train ;-)')
-    bst = lgb.train(params, d_train, ROUNDS)
-    valid_local['pred'] = bst.predict(valid_local[f_to_use])
-    valid_local['pred'] = valid_local['pred'] > TRESHOLD
+    tresholds = []
+    scores = []
+    for n in range(20):
+        treshold = 0.1 + n * 0.02
+        print('local evaluation of the model with {} treshold'.format(treshold))
+        df_train['Y'] = labels
+        train_local, valid_local = split_train_df(df_train)
+        d_train = lgb.Dataset(train_local[f_to_use],
+                              label=train_local['Y'],
+                              categorical_feature=['aisle_id', 'department_id'])
+        print('  light GBM train ;-)')
+        bst = lgb.train(params, d_train, ROUNDS)
+        valid_local['pred'] = bst.predict(valid_local[f_to_use])
+        valid_local['pred'] = valid_local['pred'] > treshold
 
-    score = calc_avg_f1(
-        valid_local[valid_local['Y'] == True].groupby('order_id')['product_id'].apply(
-            lambda x: [int(p) for p in x] if x.any() else []),
-        valid_local[valid_local['pred'] == True].groupby('order_id')['product_id'].apply(
-            lambda x: [int(p) for p in x] if x.any() else []))
+        score = calc_avg_f1(
+            valid_local[valid_local['Y'] == True].groupby('order_id')['product_id'].apply(
+                lambda x: [int(p) for p in x] if x.any() else []),
+            valid_local[valid_local['pred'] == True].groupby('order_id')['product_id'].apply(
+                lambda x: [int(p) for p in x] if x.any() else []))
 
-    print('score:', score)
+        print('  score:', score)
 
+        tresholds.append(treshold)
+        scores.append(score)
+    import matplotlib.pyplot as plt
+    plt.plot(tresholds, scores)
+    plt.show()
 else:
     print('formating for lgb')
     d_train = lgb.Dataset(df_train[f_to_use],

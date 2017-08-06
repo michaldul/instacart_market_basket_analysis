@@ -132,6 +132,28 @@ def get_UP_relative_streak_feature():
     return streak_df[['user_id', 'product_id', 'UP_relative_streak']]
 
 
+def get_product_shares_features(prior_orders):
+    res = None
+    for area in ['aisle', 'department']:
+        area_field = '{}_id'.format(area)
+        area_size_filed = '{}_size'.format(area)
+        products_orders = prior_orders.groupby([area_field, 'product_id'])['order_id'].count().rename('product_size').reset_index()
+        area_orders = prior_orders.groupby([area_field])['order_id'].count().rename(area_size_filed).reset_index()
+        shares_df = pd.merge(products_orders, area_orders)
+        shares_df['_p_{}_share'.format(area)] = shares_df['product_size'] / shares_df[area_size_filed]
+        if res is None:
+            res = shares_df
+        else:
+            res = pd.merge(shares_df, res)
+
+    return res[['product_id', '_p_aisle_share', '_p_department_share']]
+
+
+def get_user_diversity_features(prior_orders):
+    return pd.merge(prior_orders.groupby(['user_id'])['aisle_id'].nunique().rename('_u_aisle_diversity').reset_index(),
+                    prior_orders.groupby(['user_id'])['department_id'].nunique().rename('_u_department_diversity').reset_index())
+
+
 if __name__ == '__main__':
     path_data = 'input/'
     priors, train, orders, products, aisles, departments, sample_submission = load_data(path_data)
@@ -141,6 +163,7 @@ if __name__ == '__main__':
     # Products information ----------------------------------------------------------------
     # add order information to priors set
     priors_orders_detail = orders.merge(right=priors, how='inner', on='order_id')
+    priors_orders_detail = priors_orders_detail.merge(right=products, how='inner', on='product_id')
 
     priors_orders_detail.loc[:, '_user_buy_product_times'] = \
         priors_orders_detail.groupby(['user_id', 'product_id']).cumcount() + 1
@@ -197,6 +220,8 @@ if __name__ == '__main__':
     data = data.merge(prd, how='inner', on='product_id').merge(users, how='inner', on='user_id')
 
     data = data.merge(get_UP_relative_streak_feature())
+    data = data.merge(get_product_shares_features(priors_orders_detail))
+    data = data.merge(get_user_diversity_features(priors_orders_detail))
 
     data['_up_order_rate'] = data._up_order_count / data._user_total_orders
     data['_up_order_since_last_order'] = data._user_total_orders - data._up_last_order_number
@@ -239,16 +264,37 @@ if __name__ == '__main__':
 
     }
 
-    FEATURES = ['_up_average_cart_position', '_up_last_order_number',
-                '_up_first_order_number', '_up_order_count', '_prod_reorder_tot_cnts',
-                '_prod_tot_cnts', '_prod_buy_first_time_total_cnt',
-                '_prod_buy_second_time_total_cnt', '_prod_reorder_prob',
-                '_prod_reorder_ratio', '_prod_reorder_times',
-                '_user_sum_days_since_prior_order', '_user_mean_days_since_prior_order',
-                '_user_total_orders', '_user_total_products', '_user_distinct_products',
-                '_user_reorder_ratio', '_user_average_basket', 'time_since_last_order',
-                '_up_order_rate', '_up_order_since_last_order',
-                '_up_order_rate_since_first_order']#, 'UP_relative_streak']
+    FEATURES = ['_up_average_cart_position',
+                '_up_last_order_number',
+                '_up_first_order_number',
+                '_up_order_count',
+                '_prod_reorder_tot_cnts',
+                '_prod_tot_cnts',
+                '_prod_buy_first_time_total_cnt',
+                '_prod_buy_second_time_total_cnt',
+                '_prod_reorder_prob',
+                '_prod_reorder_ratio',
+                '_prod_reorder_times',
+                '_user_sum_days_since_prior_order',
+                '_user_mean_days_since_prior_order',
+                '_user_total_orders',
+                '_user_total_products',
+                '_user_distinct_products',
+                '_user_reorder_ratio',
+                '_user_average_basket',
+                'time_since_last_order',
+                '_up_order_rate',
+                '_up_order_since_last_order',
+                '_up_order_rate_since_first_order',
+                '_p_aisle_share',
+                '_p_department_share',
+                '_u_aisle_diversity',
+                '_u_department_diversity']
+                # 'UP_relative_streak' -- no gain
+
+    # todo aisle share/department share
+    # todo '_ua_reorder_ration', '_ud_reorder_ration',  product diversity (aisle, department)
+    # todo trend features
 
     TARGET_FEATURE = 'reordered'
 
@@ -269,7 +315,6 @@ if __name__ == '__main__':
                 bst = xgboost.train(params=xgb_params, dtrain=d_train, num_boost_round=80, evals=watchlist, verbose_eval=10)
 
                 d_test = xgboost.DMatrix(valid_test[FEATURES])
-
                 predicted = (bst.predict(d_test) > CLASSIFIER_THRESHOLD)
                 valid_test['prediction'] = (predicted | valid_test['user_product_frequency_indicator']).astype(int)
 
@@ -320,3 +365,4 @@ if __name__ == '__main__':
         submit.columns = sample_submission.columns.tolist()
         submit_final = sample_submission[['order_id']].merge(submit, how='left').fillna('None')
         submit_final.to_csv("xgboost.csv", index=False)
+        beep()
